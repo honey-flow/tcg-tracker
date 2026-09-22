@@ -1,6 +1,8 @@
+PRAGMA user_version = 0;
+
 -- ==============================================================
 -- Printings: Identity. What a card IS, independent of ownership.
--- One row per disctinct printing in the world.
+-- One row per distinct printing in the world.
 -- ==============================================================
 CREATE TABLE printings (
     printing_id      INTEGER PRIMARY KEY,
@@ -13,11 +15,26 @@ CREATE TABLE printings (
     finish           TEXT    NOT NULL DEFAULT 'normal',
     rarity           TEXT    NOT NULL DEFAULT 'none',
     image_uri        TEXT,
-    external_id      TEXT,
+
+    print_variant    TEXT    NOT NULL DEFAULT 'none',
+
+-- ----- Source Identified: Scryfall UUID, TCGdex card_id, and optcgapi card_image_id -----
+    source_id        TEXT,
+
+-- ----- Source Name -----
+    source_name      TEXT,
+
+-- ----- TCGPlayer product ID -----
+    tcgplayer_id     INTEGER,
+
+-- ----- Cardmarket product ID (EUR prices) -----
+    cardmarket_id    INTEGER,
+
+-- ----- Complete API Response, verbatim -----
+    raw_json         TEXT,
 
 -- ----- Pokemon Specific -----
     pkmn_promo_stamp TEXT    NOT NULL DEFAULT 'none',
-    pkmn_edition     TEXT    NOT NULL DEFAULT 'none',
 
 -- ----- One Piece Specific -----
     op_parallel_type TEXT    NOT NULL DEFAULT 'none',
@@ -25,10 +42,14 @@ CREATE TABLE printings (
 -- ----- Magic The Gathering Specific -----
     mtg_frame_style  TEXT    NOT NULL DEFAULT 'none',
 
-    UNIQUE (game, set_code, collector_number, finish, pkmn_promo_stamp, pkmn_edition, op_parallel_type, mtg_frame_style)
+    created_at       TEXT    NOT NULL DEFAULT (datetime('now')),
+
+    UNIQUE (game, set_code, collector_number, finish, print_variant, pkmn_promo_stamp, op_parallel_type, mtg_frame_style)
 );
 
 CREATE INDEX idx_printings_game_name ON printings (game, name);
+
+CREATE INDEX idx_printings_tcgplayer ON printings (tcgplayer_id);
 
 -- ==============================================================
 -- Locations: Where you physically keep things.
@@ -53,9 +74,12 @@ CREATE TABLE prices (
                         REFERENCES  printings(printing_id),
     price_date  TEXT    NOT NULL,
     source      TEXT    NOT NULL,
+
+    grade_key   TEXT    NOT NULL DEFAULT 'raw',
+
     price_cents INTEGER NOT NULL,
 
-    UNIQUE (printing_id, price_date, source)                  
+    UNIQUE (printing_id, price_date, source, grade_key)                  
 );
 
 CREATE INDEX idx_prices_printing_date ON prices (printing_id, price_date DESC);
