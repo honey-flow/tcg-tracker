@@ -53,16 +53,29 @@ CREATE INDEX idx_printings_tcgplayer ON printings (tcgplayer_id);
 
 -- ==============================================================
 -- Locations: Where you physically keep things.
--- Small lookup table. Exists so location names are consistent
--- and so the UI can offer a dropdown instead of free text.
+-- A tree -- cabinet > drawer > box. parent_location_id points at
+-- another location. NULL means top level. Copies may point at
+-- ANY level.
 -- ==============================================================
 CREATE TABLE locations (
-    location_id INTEGER PRIMARY KEY,
-    name        TEXT    NOT NULL UNIQUE,
-    description TEXT,
-    is_active   INTEGER NOT NULL DEFAULT 1
-                        CHECK (is_active IN (0,1))
+    location_id        INTEGER PRIMARY KEY,
+
+    parent_location_id INTEGER REFERENCES locations(location_id),
+
+    name               TEXT    NOT NULL,
+    description        TEXT,
+
+    is_active          INTEGER NOT NULL DEFAULT 1
+                               CHECK (is_active IN (0,1))
 );
+
+CREATE UNIQUE INDEX idx_locations_sibling ON locations (parent_location_id, name)
+    WHERE parent_location_id IS NOT NULL;
+
+CREATE UNIQUE INDEX idx_locations_toplevel ON locations (name)
+    WHERE parent_location_id IS NULL;
+
+CREATE INDEX idx_locations_parent ON locations (parent_location_id);
 
 -- ==============================================================
 -- Prices: Market value over time. A fact about the WORLD, not

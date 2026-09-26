@@ -1,4 +1,5 @@
-﻿using TcgTracker.Data;
+﻿using Microsoft.Data.Sqlite;
+using TcgTracker.Data;
 
 var dataDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "TcgTracker");
 Directory.CreateDirectory(dataDir);
@@ -77,6 +78,93 @@ foreach (var r in result.Renames)
     $"{r.IncomingKey.SetCode} {r.IncomingKey.CollectorNumber} " +
     $"(existing printing_id {r.ExistingPrintingId}) - NOT applied");
 }
+
+// Location Repo Test - Does not Insert into the real Database
+var locRepo = new LocationRepository();
+using (var conn = db.Connect())
+using (var tx = conn.BeginTransaction())
+{
+  var cabA = locRepo.Insert(conn, new Location { Name = "Cabinet A" }, tx);
+  var cabB = locRepo.Insert(conn, new Location { Name = "Cabinet B" }, tx);
+  Console.WriteLine($"Cabinet A : {cabA.Outcome} id {cabA.locationId}");
+
+  // Same name, different parents
+  var d1 = locRepo.Insert(conn, new Location { Name = "Drawer 1", ParentLocationId = cabA.locationId }, tx);
+  var d2 = locRepo.Insert(conn, new Location { Name = "Drawer 1", ParentLocationId = cabB.locationId }, tx);
+  Console.WriteLine($"Drawer 1 in A: {d1.locationId}; Drawer 1 in B: {d2.locationId}");
+
+  // Same name, same parent -- reported, not thrown, with the existing id
+  var dup = locRepo.Insert(conn, new Location { Name = "Drawer 1", ParentLocationId = cabA.locationId }, tx);
+  Console.WriteLine($"Duplicate sibling: {dup.Outcome}, id {dup.locationId} (should be {d1.locationId})");
+
+  // Duplicate TOP-LEVEL name
+  var dupTop = locRepo.Insert(conn, new Location { Name = "Cabinet A" }, tx);
+  Console.WriteLine($"Duplicate top level: {dupTop.Outcome}, id {dupTop.locationId} (should be {cabA.locationId})");
+
+  Console.WriteLine($"Top-level location: {locRepo.GetChildren(conn, null, tx).Count}");
+  Console.WriteLine($"Inside Cabinet A: {locRepo.GetChildren(conn, cabA.locationId, tx).Count}");
+
+  locRepo.SetActive(conn, cabB.locationId, false, tx);
+  Console.WriteLine($"Active:             {locRepo.GetAll(conn, false, tx).Count}, " +
+                    $"including inactive: {locRepo.GetAll(conn, true, tx).Count}");
+
+  tx.Rollback();
+}
+
+// Copy Repo Test - Does not Insert int the real Database
+var copyRepo = new CopyRepository();
+using (var conn = db.Connect())
+using (var tx = conn.BeginTransaction())
+{
+  var bolt = printings.First(p => p.Name == "Lightning Bolt");
+  var boltId = new PrintingRepository().FindId(conn, bolt, tx)
+              ?? throw new InvalidOperationException("Lightning Bolt is not in database.");
+
+  var id = copyRepo.Insert(conn, new Copy
+  {
+    PrintingId            = boltId,
+    Condition             = CardCondition.LP,
+    AcquisitionPriceCents = 45000,
+    AcquisitionDate       = new DateOnly(2024, 3, 11)
+  }, tx);
+
+  var back = copyRepo.GetById(conn, id, tx);
+  Console.WriteLine($"Copy {id}: {back?.Condition} {back?.Status}, location {back?.LocationId}, " +
+                    $"paid {back?.AcquisitionPriceCents} cents on {back?.AcquisitionDate:yyyy-MM-dd}");
+
+  try
+  {
+    copyRepo.Insert(conn, new Copy
+    {
+      PrintingId = boltId,
+      Status     = CopyStatus.Sold
+    }, tx);
+    
+    Console.WriteLine("  BAD: incoherent sold row was ACCEPTED");
+  }
+  catch (SqliteException ex)
+  {
+    Console.WriteLine($"  Rejected as expected: {ex.Message.Split('\n')[0]}");
+  }
+
+  try
+  {
+    copyRepo.Insert(conn, new Copy { PrintingId = 999999 }, tx);
+    Console.WriteLine("  BAD: orphan copy was ACCEPTED");
+  }
+  catch (SqliteException ex)
+  {
+    Console.WriteLine($"  Rejected as expected: {ex.Message}");
+  }
+
+  Console.WriteLine($"Owned copies inside this transaction: {copyRepo.GetAllOwned(conn, tx).Count}");
+
+  tx.Rollback();
+}
+
+
+
+
 
 /**
 foreach (var cardRef in refs)
