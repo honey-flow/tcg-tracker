@@ -92,7 +92,7 @@ public class PrintingRepository
         source_name   = $source_name,
         tcgplayer_id  = $tcgplayer_id,
         cardmarket_id = $cardmarket_id,
-        raw_json      = $raw_json
+        raw_json      = COALESCE($raw_json, raw_json)
       WHERE printing_id = $printing_id;";
       
     cmd.Parameters.AddWithValue("$printing_id",   printingId);

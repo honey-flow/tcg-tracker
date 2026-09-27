@@ -18,14 +18,15 @@ public class ScryfallSource : ICatalogSource
     var body = await response.Content.ReadAsStringAsync();
 
     using var doc = JsonDocument.Parse(body);
-    var root = doc.RootElement;
+    
+    return MapCard(doc.RootElement, body).ToList();
+  }
 
-    var results = new List<Printing>();
-
+  public static IEnumerable<Printing> MapCard(JsonElement root, string? rawJson)
+  {
     foreach (var finishName in ReadFinishes(root))
     {
-
-      results.Add(new Printing
+      yield return new Printing
       {
         Game            =                           "mtg"                      ,
         Name            =     GetString(root,       "name"                    ),
@@ -43,11 +44,9 @@ public class ScryfallSource : ICatalogSource
 
         MtgFrameStyle   = GetFrameStyle(root                                  ),
 
-        RawJson         =                            body
-      });
+        RawJson         =                            rawJson
+      };
     }
-
-    return results;
   }
 
   private static string GetString(JsonElement el, string prop, string fallback = "") => 

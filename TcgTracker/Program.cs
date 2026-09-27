@@ -1,4 +1,5 @@
-﻿using Microsoft.Data.Sqlite;
+﻿using System.Net;
+using Microsoft.Data.Sqlite;
 using TcgTracker.Data;
 
 var dataDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "TcgTracker");
@@ -24,7 +25,7 @@ using (var conn = db.Connect())
 }
 **/
 
-var http = new HttpClient();
+var http = new HttpClient(new SocketsHttpHandler { AutomaticDecompression = DecompressionMethods.All} );
 http.DefaultRequestHeaders.Add("User-Agent", "TcgTracker/0.1");
 http.DefaultRequestHeaders.Add("Accept", "application/json");
 
@@ -77,6 +78,28 @@ foreach (var r in result.Renames)
     $"  RENAME?   {r.SourceName}:{r.SourceId} now keys as " + 
     $"{r.IncomingKey.SetCode} {r.IncomingKey.CollectorNumber} " +
     $"(existing printing_id {r.ExistingPrintingId}) - NOT applied");
+}
+
+const bool runBulkImport = true;
+
+if (runBulkImport)
+{
+  var bulk = new ScryfallBulk(http, Path.Combine(dataDir, "bulk"));
+  var bulkFile = await bulk.EnsureFileAsync(Console.WriteLine);
+
+  var sw = System.Diagnostics.Stopwatch.StartNew();
+
+  var bulkResult = await importer.ImportBulkAsync(
+    ScryfallBulk.StreamPrintingsAsync(bulkFile),
+    batchSize: 5_000, 
+    progress: Console.WriteLine);
+  
+  sw.Stop();
+  
+  Console.WriteLine(
+    $"Bulk: inserted {bulkResult.Inserted:N0}, updated {bulkResult.Updated:N0}, " +
+    $"unchanged {bulkResult.Unchanged:N0}, duplicates {bulkResult.Duplicates:N0}, " +
+    $"renames {bulkResult.Renames.Count:N0} in {sw.Elapsed.TotalSeconds:N1}s");
 }
 
 // Location Repo Test - Does not Insert into the real Database
