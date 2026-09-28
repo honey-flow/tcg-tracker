@@ -17,6 +17,7 @@ CREATE TABLE printings (
     image_uri        TEXT,
 
     print_variant    TEXT    NOT NULL DEFAULT 'none',
+    variant_key      TEXT    NOT NULL DEFAULT 'none',
 
 -- ----- Source Identified: Scryfall UUID, TCGdex card_id, and optcgapi card_image_id -----
     source_id        TEXT,
@@ -44,7 +45,22 @@ CREATE TABLE printings (
 
     created_at       TEXT    NOT NULL DEFAULT (datetime('now')),
 
-    UNIQUE (game, set_code, collector_number, finish, print_variant, pkmn_promo_stamp, op_parallel_type, mtg_frame_style)
+    UNIQUE (game, set_code, collector_number, finish, print_variant, variant_key, pkmn_promo_stamp, op_parallel_type, mtg_frame_style)
+);
+
+CREATE TABLE variant_collisions ( 
+    collision_id    INTEGER PRIMARY KEY,
+    game            TEXT    NOT NULL, 
+    source_name     TEXT    NOT NULL,
+    source_card_id  TEXT    NOT NULL,
+
+    collision_count INTEGER NOT NULL,
+
+    detected_at     TEXT    NOT NULL DEFAULT (datetime('now')),
+
+    resolved_at     TEXT,
+
+    UNIQUE (source_name, source_card_id)
 );
 
 CREATE INDEX idx_printings_game_name ON printings (game, name);

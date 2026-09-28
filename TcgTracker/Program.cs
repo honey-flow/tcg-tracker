@@ -80,26 +80,62 @@ foreach (var r in result.Renames)
     $"(existing printing_id {r.ExistingPrintingId}) - NOT applied");
 }
 
-const bool runBulkImport = true;
+// Magic the Gathering Bulk Import
+const bool runMtgImport = true;
 
-if (runBulkImport)
+if (runMtgImport)
 {
-  var bulk = new ScryfallBulk(http, Path.Combine(dataDir, "bulk"));
-  var bulkFile = await bulk.EnsureFileAsync(Console.WriteLine);
+  var mtgBulk = new ScryfallBulk(http, Path.Combine(dataDir, "bulk"));
+  var bulkFile = await mtgBulk.EnsureFileAsync(Console.WriteLine);
 
-  var sw = System.Diagnostics.Stopwatch.StartNew();
+  var mtgSw = System.Diagnostics.Stopwatch.StartNew();
 
   var bulkResult = await importer.ImportBulkAsync(
     ScryfallBulk.StreamPrintingsAsync(bulkFile),
     batchSize: 5_000, 
     progress: Console.WriteLine);
   
-  sw.Stop();
+  mtgSw.Stop();
   
   Console.WriteLine(
-    $"Bulk: inserted {bulkResult.Inserted:N0}, updated {bulkResult.Updated:N0}, " +
+    $"MTG: inserted {bulkResult.Inserted:N0}, updated {bulkResult.Updated:N0}, " +
     $"unchanged {bulkResult.Unchanged:N0}, duplicates {bulkResult.Duplicates:N0}, " +
-    $"renames {bulkResult.Renames.Count:N0} in {sw.Elapsed.TotalSeconds:N1}s");
+    $"renames {bulkResult.Renames.Count:N0} in {mtgSw.Elapsed.TotalSeconds:N1}s");
+}
+
+// Pokémon Import
+const bool runPokemonImport = true;
+
+if (runPokemonImport)
+{
+  var pokemonBulk = new TcgdexBulk(http, db, new CollisionRepository());
+  var pkSw = System.Diagnostics.Stopwatch.StartNew();
+
+  var pkResult = await importer.ImportBulkAsync(
+    pokemonBulk.StreamPrintingsAsync(Console.WriteLine), batchSize: 5_000, progress: Console.WriteLine);
+
+  pkSw.Stop();
+
+  Console.WriteLine(
+    $"Pokémon: inserted {pkResult.Inserted:N0}, updated {pkResult.Updated:N0}, " +
+    $"unchanged {pkResult.Unchanged:N0}, duplicates {pkResult.Duplicates:N0}, " +
+    $"renames {pkResult.Renames.Count:N0} in {pkSw.Elapsed.TotalSeconds:N1}s");
+}
+
+const bool runReconcile = true;
+if (runReconcile)
+{
+  var collisionRepo = new CollisionRepository();
+  var reconciler = new VariantReconciler(http, db, new PrintingRepository(), collisionRepo);
+
+  var rcSW = System.Diagnostics.Stopwatch.StartNew();
+  var rcResult = await reconciler.RunAsync(delayMs: 150, progress: Console.WriteLine);
+  rcSW.Stop();
+
+  Console.WriteLine(
+    $"Reconcile: {rcResult.CardProcessed:N0} cards, " +
+    $"{rcResult.PrintingsInserted:N0} printings added, " +
+    $"{rcResult.Failed:N0} failed in {rcSW.Elapsed.TotalSeconds:N1}s");
 }
 
 // Location Repo Test - Does not Insert into the real Database

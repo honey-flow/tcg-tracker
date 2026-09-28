@@ -165,10 +165,10 @@ public class CatalogImporter
     Compare("card_type",     s.CardType,                 p.CardType);
     Compare("rarity",        s.Rarity,                   p.Rarity);
     Compare("image_uri",     s.ImageUri,                 p.ImageUri);
-    Compare("source_id",     s.SourceId,                 p.SourceId);
-    Compare("source_name",   s.SourceName,               p.SourceName);
-    Compare("tcgplayer_id",  s.TcgplayerId?.ToString(),  p.TcgplayerId?.ToString());
-    Compare("cardmarket_id", s.CardmarketId?.ToString(), p.CardmarketId?.ToString());
+    CompareIfPresent("source_id",     s.SourceId,                 p.SourceId);
+    CompareIfPresent("source_name",   s.SourceName,               p.SourceName);
+    CompareIfPresent("tcgplayer_id",  s.TcgplayerId?.ToString(),  p.TcgplayerId?.ToString());
+    CompareIfPresent("cardmarket_id", s.CardmarketId?.ToString(), p.CardmarketId?.ToString());
 
     return changes;
 
@@ -176,6 +176,12 @@ public class CatalogImporter
     {
       if (stored != incoming)
         changes.Add(new FieldChange(field, stored, incoming));
+    }
+
+    void CompareIfPresent(string field, string? stored, string? incoming)
+    {
+      if (incoming is not null)
+        Compare(field, stored, incoming);
     }
   }
 
