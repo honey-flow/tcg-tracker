@@ -81,7 +81,7 @@ foreach (var r in result.Renames)
 }
 
 // Magic the Gathering Bulk Import
-const bool runMtgImport = true;
+const bool runMtgImport = false;
 
 if (runMtgImport)
 {
@@ -103,8 +103,49 @@ if (runMtgImport)
     $"renames {bulkResult.Renames.Count:N0} in {mtgSw.Elapsed.TotalSeconds:N1}s");
 }
 
+// Magic the Gathering Price Import
+const bool runMtgPrices = false;
+
+if (runMtgPrices)
+{
+  var priceBulk = new ScryfallBulk(http, Path.Combine(dataDir, "bulk"));
+  var priceFile = await priceBulk.EnsureFileAsync(Console.WriteLine);
+
+  var prSw = System.Diagnostics.Stopwatch.StartNew();
+  var pr = await new ScryfallPrices(db, new PrintingRepository(), new PriceRepository()).RefreshAsync(priceFile, Console.WriteLine);
+  prSw.Stop();
+
+  Console.WriteLine(
+    $"MTG Prices (as of {pr.AsOf}): {pr.CardsRead:N0} cards, {pr.PrintingRows:N0} printing rows, " +
+    $"{pr.Written.PrintingsCovered:N0} covered, {pr.Written.CurrentRowsWritten} prices written " +
+    $"in {prSw.Elapsed.TotalSeconds:N1}s");
+
+  Console.WriteLine(
+    $"  not in catalog {pr.NotInCatalog:N0}, ambiguous {pr.Ambiguous:N0}, " +
+    $"unknown finish {pr.UnknownFinish:N0}, unparseable {pr.Unparseable:N0}");
+
+  Console.WriteLine(
+    $"  history: {pr.Written.SnapshotsAdded:N0} added, {pr.Written.SnapshotsAlreadyStored:N0} already stored");
+
+  if (!pr.Balances) Console.WriteLine("  COUNT MISMATCH: printing rows don't add up");
+
+  //Spot-Check
+  using var priceConn = db.Connect();
+  var priceRepo = new PriceRepository();
+  foreach (var bolt in printings.Where(p => p.Name == "Lightning Bolt"))
+  {
+    var boltId = new PrintingRepository().FindId(priceConn, bolt);
+    if (boltId is null) continue;
+
+    foreach (var o in priceRepo.GetCurrent(priceConn, boltId.Value))
+      Console.WriteLine(
+        $"  {bolt.SetCode} {bolt.CollectorNumber} {bolt.Finish}: " +
+        $"{o.Metric} {o.AmountCents / 100m:N2} {o.Currency} (as of {o.AsOf})");
+  }
+}
+
 // Pokémon Import
-const bool runPokemonImport = true;
+const bool runPokemonImport = false;
 
 if (runPokemonImport) 
 {
@@ -279,6 +320,65 @@ using (var tx = conn.BeginTransaction())
   Console.WriteLine($"Owned copies inside this transaction: {copyRepo.GetAllOwned(conn, tx).Count}");
 
   tx.Rollback();
+}
+
+const bool RunPriceHistoryTest = true;
+
+if (RunPriceHistoryTest)
+{
+  var histFile  = await new ScryfallBulk(http, Path.Combine(dataDir, "bulk")).EnsureFileAsync();
+  var refresher = new ScryfallPrices(db, new PrintingRepository(), new PriceRepository());
+
+  using var testConn = db.Connect();
+  var testBolt   = printings.First(p => p.Name == "Lightning Bolt");
+  var testBoltId = new PrintingRepository().FindId(testConn, testBolt) 
+                   ?? throw new InvalidOperationException("Lightning Bolt is not in database.");
+
+  if (new PriceRepository().LoadHeldPrintingIds(testConn, "mtg").Contains(testBoltId))
+  {
+    Console.WriteLine("History test SKIPPED: this Bolt is really held; cleanup would delete its history.");
+  }
+  else
+  {
+    var testCopyId = new CopyRepository().Insert(testConn, new Copy { PrintingId = testBoltId, Condition = CardCondition.NM });
+
+    try
+    {
+      var run1 = await refresher.RefreshAsync(histFile);
+      var run2 = await refresher.RefreshAsync(histFile);
+
+      using var count = testConn.CreateCommand();
+      count.CommandText = "SELECT COUNT(*) FROM current_prices WHERE source = 'scryfall';";
+      var storedRows = Convert.ToInt64(count.ExecuteScalar());
+
+      using var snap = testConn.CreateCommand();
+      snap.CommandText = @"
+                           SELECT json_extract(payload, '$.usd') FROM price_snapshots
+                           WHERE printing_id = $printing_id AND source = 'scryfall';";
+      snap.Parameters.AddWithValue("$printing_id", testBoltId);
+      var snapshotUsd = snap.ExecuteScalar();
+
+      Check("run 1 history", run1.Written.SnapshotsAdded == 1 && run1.Written.SnapshotsAlreadyStored == 0,
+            $"{run1.Written.SnapshotsAdded} added, {run1.Written.SnapshotsAlreadyStored} already stored");
+      Check("run 2 history", run2.Written.SnapshotsAdded == 0 && run2.Written.SnapshotsAlreadyStored == 1,
+            $"{run2.Written.SnapshotsAdded} added, {run2.Written.SnapshotsAlreadyStored} already stored");
+      Check("current replaced, not appended", storedRows == run2.Written.CurrentRowsWritten,
+            $"{storedRows:N0} stored, {run2.Written.CurrentRowsWritten:N0} written");
+      Console.WriteLine($"  snapshot usd: {snapshotUsd} (should match the Bolt's usd above)");
+    }
+    finally
+    {
+      using var cleanup = testConn.CreateCommand();
+      cleanup.CommandText = @"
+                              DELETE FROM price_snapshots WHERE printing_id = $printing_id AND source = 'scryfall';
+                              DELETE FROM copies          WHERE copy_id     = $copy_id;";
+      cleanup.Parameters.AddWithValue("$printing_id", testBoltId);
+      cleanup.Parameters.AddWithValue("$copy_id",     testCopyId);
+      cleanup.ExecuteNonQuery();
+    }
+  }
+
+  static void Check(string what, bool ok, string detail) => Console.WriteLine($"  {(ok ? "PASS" : "FAIL")} {what}: {detail}");
 }
 
 

@@ -49,6 +49,7 @@ public class ScryfallBulk
       await source.CopyToAsync(dest);
     }
 
+    File.Delete(versionPath);
     File.Move(tempPath, filePath, overwrite: true);
 
     await File.WriteAllTextAsync(versionPath, updatedAt);
@@ -58,18 +59,32 @@ public class ScryfallBulk
 
   public static async IAsyncEnumerable<Printing> StreamPrintingsAsync(string filePath)
   {
+    await foreach (var line in ReadLinesAsync(filePath))
+    {
+      using var doc = JsonDocument.Parse(line);
+
+      foreach (var printing in ScryfallSource.MapCard(doc.RootElement, rawJson: null))
+        yield return printing;
+    }
+  }
+
+  public static async IAsyncEnumerable<string> ReadLinesAsync(string filePath)
+  {
     await using var file = File.OpenRead(filePath);
     await using var json = await OpenMaybeGzipAsync(file);
     using var reader = new StreamReader(json);
 
     while (await reader.ReadLineAsync() is {} line)
-    {
-      if (line.Length == 0) continue;
+      if (line.Length > 0) yield return line;
+  }
 
-      using var doc = JsonDocument.Parse(line);
+  public static string VersionOf(string filePath)
+  {
+    var versionPath = filePath + ".version";
+    if (!File.Exists(versionPath))
+      throw new InvalidOperationException($"No version file next to {filePath}. Run EnsureFileAsync first.");
 
-      foreach (var printing in ScryfallSource.MapCard(doc.RootElement, rawJson: null)) yield return printing;
-    }
+    return File.ReadAllText(versionPath).Trim();
   }
 
   private static async Task<Stream> OpenMaybeGzipAsync(Stream raw)
