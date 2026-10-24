@@ -4,10 +4,13 @@ namespace TcgTracker.Data;
 
 public class Database
 {
+  public string DbPath {get;} 
+  
   private readonly string _connectionString;
 
   public Database(string dbPath)
   {
+    DbPath = dbPath;
     _connectionString = new SqliteConnectionStringBuilder{DataSource = dbPath}.ToString();
   }
 

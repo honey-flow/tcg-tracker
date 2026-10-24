@@ -11,9 +11,16 @@ public class CollisionRepository
     using var cmd = conn.CreateCommand();
     cmd.Transaction = tx;
     cmd.CommandText = @"
-      INSERT OR IGNORE INTO variant_collisions
+      INSERT INTO variant_collisions
         (game, source_name, source_card_id, collision_count)
-      VALUES ($game, $source_name, $source_card_id, $collision_count);";
+      VALUES ($game, $source_name, $source_card_id, $collision_count)
+      ON CONFLICT (source_name, source_card_id) DO UPDATE SET
+        collision_count = excluded.collision_count,
+        resolved_at = CASE
+                        WHEN excluded.collision_count <> collision_count
+                        THEN NULL
+                        ELSE resolved_at
+                      END;";
 
     cmd.Parameters.AddWithValue("$game",            c.Game        );
     cmd.Parameters.AddWithValue("$source_name",     c.SourceName  );
@@ -62,7 +69,7 @@ public class CollisionRepository
     using var cmd = conn.CreateCommand();
     cmd.Transaction = tx;
     cmd.CommandText = @"
-      SELECT COUNT(*) FROM variant_collisions;";
+      SELECT COUNT(*) FROM variant_collisions WHERE resolved_at IS NULL;";
     return Convert.ToInt32(cmd.ExecuteScalar());
   }
 }

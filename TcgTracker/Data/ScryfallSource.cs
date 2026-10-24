@@ -28,23 +28,23 @@ public class ScryfallSource : ICatalogSource
     {
       yield return new Printing
       {
-        Game            =                           "mtg"                      ,
-        Name            =     GetString(root,       "name"                    ),
-        CardType        =     GetString(root,       "type_line",        "none"), 
-        SetCode         =     GetString(root,       "set"                     ),
-        CollectorNumber =     GetString(root,       "collector_number"        ),
-        Finish          =                            finishName                ,
-        Rarity          =     GetString(root,       "rarity",           "none"),
-        ImageUri        =   GetImageUri(root)                                  ,
+        Game            =                             "mtg"                      ,
+        Name            =       GetString(root,       "name"                    ),
+        CardType        =       GetString(root,       "type_line",        "none"), 
+        SetCode         =       GetString(root,       "set"                     ),
+        CollectorNumber =       GetString(root,       "collector_number"        ),
+        Finish          =                             finishName                ,
+        Rarity          =       GetString(root,       "rarity",           "none"),
+        ImageUri        =     GetImageUri(root)                                  ,
 
-        SourceId        =     GetString(root,       "id"                      ),
-        SourceName      =                           "scryfall"                 ,
-        TcgplayerId     =        GetInt(root,       "tcgplayer_id"            ),
-        CardmarketId    =        GetInt(root,       "cardmarket_id"           ),
+        SourceId        =       GetString(root,       "id"                      ),
+        SourceName      =                             "scryfall"                 ,
+        TcgplayerId     =  TcgplayerIdFor(root,       finishName                ),
+        CardmarketId    =          GetInt(root,       "cardmarket_id"           ),
 
-        MtgFrameStyle   = GetFrameStyle(root                                  ),
+        MtgFrameEffects = GetFrameEffects(root                                  ),
 
-        RawJson         =                            rawJson
+        RawJson         =                             rawJson
       };
     }
   }
@@ -98,13 +98,24 @@ public class ScryfallSource : ICatalogSource
   private static bool IsTrue(JsonElement el, string prop) =>
     el.TryGetProperty(prop, out var v) && v.ValueKind == JsonValueKind.True;
 
-  private static string GetFrameStyle(JsonElement root)
+  private static string GetFrameEffects(JsonElement root)
   {
-    if (!root.TryGetProperty("frame_effects", out var effects)) return "none";
+    if (!root.TryGetProperty("frame_effects", out var arr) || arr.ValueKind != JsonValueKind.Array)
+      return "none";
 
-    var first = effects.EnumerateArray().FirstOrDefault();
-    return first.ValueKind == JsonValueKind.String
-      ? first.GetString() ?? "none"
-      : "none";
+    var effects = arr.EnumerateArray()
+      .Where(e => e.ValueKind == JsonValueKind.String)
+      .Select(e => e.GetString() ?? "")
+      .Where(e => e.Length >0)
+      .Distinct()
+      .OrderBy(s => s, StringComparer.Ordinal)
+      .ToList();
+
+    return effects.Count == 0 ? "none" : string.Join(",", effects);
   }
+
+  private static int? TcgplayerIdFor(JsonElement root, string finish) =>
+    finish == "etched" && GetInt(root, "tcgplayer_etched_id") is int etchedId
+      ? etchedId
+      : GetInt(root, "tcgplayer_id");
 }

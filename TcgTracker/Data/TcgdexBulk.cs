@@ -22,7 +22,7 @@ public class TcgdexBulk
 
   public async IAsyncEnumerable<Printing> StreamPrintingsAsync(Action<string>? progress = null)
   {
-    var pocketSets = await LoadPocketSetIdsAsync();
+    var pocketSets = await LoadPocketSetIdsAsync(progress);
     progress?.Invoke($"  excluding {pocketSets.Count} Pokémon TCG Pocket sets");
 
     var page = 1;
@@ -31,7 +31,7 @@ public class TcgdexBulk
 
     while (true)
     {
-      var cards = await FetchPageAsync(page);
+      var cards = await FetchPageAsync(page, progress);
 
       progress?.Invoke($"  page {page}: {cards.Count} cards");
 
@@ -75,9 +75,9 @@ public class TcgdexBulk
     _collisions.Record(conn, new VariantCollision("pokemon", "tcgdex", cardId, count));
   }
 
-  private async Task<HashSet<string>> LoadPocketSetIdsAsync()
+  private async Task<HashSet<string>> LoadPocketSetIdsAsync(Action<string>? progress)
   {
-    var doc = await QueryAsync("{ sets { id serie { id } } }");
+    using var doc = await QueryAsync("{ sets { id serie { id } } }", "TCGdex sets", progress);
 
     var pocket = new HashSet<string>(StringComparer.Ordinal);
 
@@ -88,7 +88,7 @@ public class TcgdexBulk
     return pocket;
   }  
 
-  private async Task<List<JsonElement>> FetchPageAsync(int page)
+  private async Task<List<JsonElement>> FetchPageAsync(int page, Action<string>? progress)
   {
     var query = $@"
       {{ 
@@ -104,15 +104,19 @@ public class TcgdexBulk
         }}
       }}";
 
-    var doc = await QueryAsync(query);
+    using var doc = await QueryAsync(query, $"TCGdex page {page}", progress);
 
     return doc.RootElement.GetProperty("data").GetProperty("cards").EnumerateArray().Select(e => e.Clone()).ToList();
   }
 
-  private async Task<JsonDocument> QueryAsync(string query)
+  private async Task<JsonDocument> QueryAsync(string query, string what, Action<string>? progress)
   {
-    using var response = await _http.PostAsJsonAsync(GraphQlUrl, new { query });
-    response.EnsureSuccessStatusCode();
+    using var response = await HttpRetry.SendAsync(
+      () => _http.PostAsJsonAsync(GraphQlUrl, new { query }), what, progress);
+
+    if (!response.IsSuccessStatusCode)
+      throw new HttpRequestException(
+        $"{what}: TCGdex returned {(int)response.StatusCode} {response.ReasonPhrase}", null, response.StatusCode);
 
     var body = await response.Content.ReadAsStringAsync();
     var doc = JsonDocument.Parse(body);
@@ -121,7 +125,7 @@ public class TcgdexBulk
     {
       var first = errors.EnumerateArray().FirstOrDefault();
       doc.Dispose();
-      throw new InvalidOperationException($"TCGDex GraphQL error: {GetString(first, "message")}");
+      throw new InvalidOperationException($"{what}: TCGdex GraphQL error: {GetString(first, "message")}");
     }
 
     return doc;

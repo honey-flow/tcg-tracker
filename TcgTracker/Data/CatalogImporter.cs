@@ -27,59 +27,14 @@ public class CatalogImporter
   public ImportResult Import(IEnumerable<Printing> printings)
   {
     using var conn = _db.Connect();
+    var run = new ImportRun(_repo.LoadAllKeys(conn), _repo.LoadSourceIds(conn));
+    
+    foreach (var p in printings) run.Classify(p);
+    run.Settle();
 
-    var stored = _repo.LoadAllKeys(conn);
-    var bySourceId = _repo.LoadSourceIds(conn);
+    WriteBatch(conn, run.ToInsert, run.ToUpdate);
 
-    var toInsert = new List<Printing>();
-    var toUpdate = new List<(long Id, Printing P)>();
-    var discrepancies = new List<Discrepancy>();
-    var renames = new List<Rename>();
-    var unchanged = 0;
-    var duplicates = 0;
-    var seen = new HashSet<PrintingKey>();
-
-    foreach (var p in printings)
-    {
-      var key = PrintingRepository.KeyOf(p);
-
-      if (!seen.Add(key))
-      {
-        duplicates++;
-        continue;
-      }
-
-      if (stored.TryGetValue(key, out var existing))
-      {
-        var changes = Diff(existing, p);
-
-        if (changes.Count == 0)
-        {
-          unchanged++;
-          continue;
-        }
-
-        discrepancies.Add(new Discrepancy(key, existing.PrintingId, changes));
-        toUpdate.Add((existing.PrintingId, p));
-        continue;
-      }
-      if (p.SourceName is not null && p.SourceId is not null 
-          && bySourceId.TryGetValue((p.SourceName, p.SourceId, p.Finish), out var movedId))
-      {
-        renames.Add(new Rename(key, movedId, p.SourceName, p.SourceId));
-        continue;
-      }
-      toInsert.Add(p);
-    }
-    using (var tx = conn.BeginTransaction())
-    {
-      foreach (var p in toInsert) _repo.Insert(conn, p, tx);
-      foreach (var (id, p) in toUpdate) _repo.Update(conn, id, p, tx);
-
-      tx.Commit();
-    }
-
-    return new ImportResult(toInsert.Count, toUpdate.Count, unchanged, duplicates, discrepancies, renames);
+    return run.Result(run.ToInsert.Count, run.ToUpdate.Count);
   }
 
   public async Task<ImportResult> ImportBulkAsync(IAsyncEnumerable<Printing> printings, int batchSize = 5_000, Action<string>? progress = null)
@@ -87,65 +42,128 @@ public class CatalogImporter
     using var conn = _db.Connect();
 
     progress?.Invoke("  reading existing printings...");
-    var stored = _repo.LoadAllKeys(conn);
-    var bySourceId = _repo.LoadSourceIds(conn);
-    progress?.Invoke($"  {stored.Count:N0} printings already stored");
-    
-    var toInsert      = new List<Printing>(batchSize);
-    var toUpdate      = new List<(long Id, Printing P)>(batchSize);
-    var discrepancies = new List<Discrepancy>();
-    var renames       = new List<Rename>();
-    var seen          = new HashSet<PrintingKey>();
+    var run = new ImportRun(_repo.LoadAllKeys(conn), _repo.LoadSourceIds(conn));
+    progress?.Invoke($"  {run.StoredCount:N0} printings already stored");
 
     var inserted   = 0; 
     var updated    = 0; 
-    var unchanged  = 0; 
-    var duplicates = 0; 
     var processed  = 0;
 
     await foreach (var p in printings)
     {
       processed++;
+      run.Classify(p);
 
+      if (run.ToInsert.Count + run.ToUpdate.Count >= batchSize)
+      {
+        WriteBatch(conn, run.ToInsert, run.ToUpdate);
+        inserted += run.ToInsert.Count;
+        updated  += run.ToUpdate.Count;
+        run.ToInsert.Clear();
+        run.ToUpdate.Clear();
+      }
+
+      if (processed % 10_000 == 0) progress?.Invoke($" {processed:N0} processed...");
+    }
+
+    run.Settle();
+
+    if (run.ToInsert.Count + run.ToUpdate.Count > 0)
+    {
+      WriteBatch(conn, run.ToInsert, run.ToUpdate);
+      inserted += run.ToInsert.Count;
+      updated  += run.ToUpdate.Count;
+    }     
+
+    return run.Result(inserted, updated);
+  }
+
+  private sealed class ImportRun
+  {
+    private readonly Dictionary<PrintingKey, StoredPrinting> _stored;
+    private readonly Dictionary<(string Source, string Id, string Finish), List<long>> _bySourceId;
+    private readonly HashSet<PrintingKey> _seen = new();
+
+    private readonly HashSet<long> _matched = new();
+
+    private readonly List<(Printing P, PrintingKey Key, (string Source, string Id, string Finish) SourceKey)> _candidates = new();
+
+    private readonly List<Discrepancy> _discrepancies = new();
+    private readonly List<Rename>      _renames       = new();
+    private int _unchanged;
+    private int _duplicates;
+
+    public List<Printing>              ToInsert {get;} = new();
+    public List<(long Id, Printing P)> ToUpdate {get;} = new();
+    public int StoredCount => _stored.Count;
+
+    public ImportRun(Dictionary<PrintingKey, StoredPrinting> stored, Dictionary<(string Source, string Id, string Finish), List<long>> bySourceId)
+    {
+      _stored     = stored;
+      _bySourceId = bySourceId;
+    }
+
+    public void Classify(Printing p)
+    {
       var key = PrintingRepository.KeyOf(p);
 
-      if (!seen.Add(key)) { duplicates++; }
-      else if (stored.TryGetValue(key, out var existing))
+      if (!_seen.Add(key)) 
+        { 
+          _duplicates++; 
+          return; 
+        }
+
+      if (_stored.TryGetValue(key, out var existing))
       {
+        _matched.Add(existing.PrintingId);
+
         var changes = Diff(existing, p);
-        if (changes.Count == 0) unchanged++;
-        else
+        if (changes.Count == 0)
         {
-          discrepancies.Add(new Discrepancy(key, existing.PrintingId, changes));
-          toUpdate.Add((existing.PrintingId, p));
+          _unchanged++;
+          return;
+        }
+
+        _discrepancies.Add(new Discrepancy(key, existing.PrintingId, changes));
+        ToUpdate.Add((existing.PrintingId, p));
+        return;
+      }
+
+      if (p.SourceName is string source && p.SourceId is string id)
+      {
+        var sk = (Source: source, Id: id, Finish: p.Finish);
+        if (_bySourceId.ContainsKey(sk))
+        {
+          _candidates.Add((p, key, sk));
+          return;
         }
       }
-      else if (p.SourceName is not null && p.SourceId is not null && bySourceId.TryGetValue((p.SourceName, p.SourceId, p.Finish), out var movedId))
-      {
-        renames.Add(new Rename(key, movedId, p.SourceName, p.SourceId));
-      }
-      else toInsert.Add(p);
 
-      if (toInsert.Count + toUpdate.Count >= batchSize)
-      {
-        WriteBatch(conn, toInsert, toUpdate);
-        inserted += toInsert.Count;
-        updated  += toUpdate.Count;
-        toInsert.Clear();
-        toUpdate.Clear();
-      }
-
-      if (processed % 10_000 == 0) progress?.Invoke($"  {processed:N0} processed...");
+      ToInsert.Add(p);
     }
-
-    if(toInsert.Count + toUpdate.Count > 0)
+    
+    public void Settle()
     {
-      WriteBatch(conn, toInsert, toUpdate);
-      inserted += toInsert.Count;
-      updated  += toUpdate.Count;
+      foreach (var group in _candidates.GroupBy(c => c.SourceKey))
+      {
+        var storedIds = _bySourceId[group.Key];
+        var unmatched = storedIds.Count(id => !_matched.Contains(id));
+        var claims    = group.ToList();
+        if (storedIds.Count == 1 && unmatched == 1 && claims.Count == 1)
+        {
+          _renames.Add(new Rename(claims[0].Key, storedIds[0], group.Key.Source, group.Key.Id));
+        }
+        else
+        {
+          foreach (var c in claims) ToInsert.Add(c.P);
+        }
+      }
+
+      _candidates.Clear();
     }
 
-    return new ImportResult(inserted, updated, unchanged, duplicates, discrepancies, renames);
+    public ImportResult Result(int inserted, int updated) =>
+      new(inserted, updated, _unchanged, _duplicates, _discrepancies, _renames);
   }
 
   private void WriteBatch(SqliteConnection conn, List<Printing> toInsert, List<(long Id,Printing P)> toUpdate)
@@ -161,10 +179,11 @@ public class CatalogImporter
   {
     var changes = new List<FieldChange>();
 
-    Compare("name",          s.Name,                     p.Name);
-    Compare("card_type",     s.CardType,                 p.CardType);
-    Compare("rarity",        s.Rarity,                   p.Rarity);
-    Compare("image_uri",     s.ImageUri,                 p.ImageUri);
+    Compare("name",              s.Name,            p.Name);
+    Compare("card_type",         s.CardType,        p.CardType);
+    Compare("rarity",            s.Rarity,          p.Rarity);
+    Compare("image_uri",         s.ImageUri,        p.ImageUri);
+    Compare("mtg_frame_effects", s.MtgFrameEffects, p.MtgFrameEffects);
     CompareIfPresent("source_id",     s.SourceId,                 p.SourceId);
     CompareIfPresent("source_name",   s.SourceName,               p.SourceName);
     CompareIfPresent("tcgplayer_id",  s.TcgplayerId?.ToString(),  p.TcgplayerId?.ToString());

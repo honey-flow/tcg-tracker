@@ -106,7 +106,7 @@ if (runMtgImport)
 // Pokémon Import
 const bool runPokemonImport = true;
 
-if (runPokemonImport)
+if (runPokemonImport) 
 {
   var pokemonBulk = new TcgdexBulk(http, db, new CollisionRepository());
   var pkSw = System.Diagnostics.Stopwatch.StartNew();
@@ -120,6 +120,66 @@ if (runPokemonImport)
     $"Pokémon: inserted {pkResult.Inserted:N0}, updated {pkResult.Updated:N0}, " +
     $"unchanged {pkResult.Unchanged:N0}, duplicates {pkResult.Duplicates:N0}, " +
     $"renames {pkResult.Renames.Count:N0} in {pkSw.Elapsed.TotalSeconds:N1}s");
+}
+
+// One Piece Import
+const bool runOnePieceImport = true;
+
+if (runOnePieceImport)
+{
+  var opSw = System.Diagnostics.Stopwatch.StartNew();
+  var opBulk = await new OptcgBulk(http).FetchAsync(Console.WriteLine);
+
+  var opResult = importer.Import(opBulk.Printings);
+
+  opSw.Stop();
+
+  Console.WriteLine(
+    $"One Piece: fetched {opBulk.RowsFetched:N0}, merged {opBulk.ExactDuplicatesMerged:N0} exact duplicates, " +
+    $"held out {opBulk.RowsHeldOut:N0} rows in {opBulk.HeldOut.Count:N0} groups");
+
+  Console.WriteLine(
+    $"  inserted {opResult.Inserted:N0}, updated {opResult.Updated:N0}, " +
+    $"unchanged {opResult.Unchanged:N0}, duplicates {opResult.Duplicates:N0}, " +
+    $"renames {opResult.Renames.Count:N0} in {opSw.Elapsed.TotalSeconds:N1}s");
+
+  if (!opBulk.Balances) Console.WriteLine("  COUNT MISMATCH inside OptcgBulk");
+  if (opResult.Total != opBulk.Printings.Count) 
+    Console.WriteLine($"  COUNT MISMATCH: handed {opBulk.Printings.Count:N0}, importer accounted for {opResult.Total:N0}");
+
+  foreach (var h in opBulk.HeldOut)
+    Console.WriteLine($"  HELD OUT  {h.Reason}: {string.Join(", ", h.ImageIds)}");
+
+  const bool listMergedGroups = true;
+  if (listMergedGroups) 
+    foreach (var m in opBulk.MergedGroups)
+      Console.WriteLine($"  MERGED   {m.ImageId} x{m.Rows}");
+
+  foreach (var r in opResult.Renames)
+    Console.WriteLine($"  RENAME    {r.SourceId} -> existing printing {r.ExistingPrintingId}");
+
+  foreach (var c in opBulk.Corrected)
+    Console.WriteLine($"  CORRECTED {c.ImageId}: card_set_id replaced with {c.CardSetIdUsed}");
+  
+  if (opBulk.Balances && opResult.Total == opBulk.Printings.Count)
+  {
+    var runAt     = CatalogIssueRepository.NewRunStamp();
+    var issueRepo = new CatalogIssueRepository();
+
+    using var issueConn = db.Connect();
+    var stored = new PrintingRepository().LoadAllKeys(issueConn);
+    var issues = OptcgIssues.Build(opBulk, stored);
+    var rec    = issueRepo.RecordRun(issueConn, OptcgIssues.Game, OptcgIssues.Source, issues, runAt);
+
+    var open = issueRepo.GetOpen(issueConn, OptcgIssues.Game);
+    Console.WriteLine($"  Issues: {rec.Seen:N0} seen this run, {rec.Resolved:N0} resolved, {open.Count:N0} open");
+    foreach (var g in open.GroupBy(i => i.Issue.Kind))
+      Console.WriteLine($"    {g.Key, -10} {g.Count():N0}");
+  }
+  else
+  {
+    Console.WriteLine("  Issues NOT recorded: counts did not balance, so this run can't be trusted to resolve anything.");
+  }
 }
 
 const bool runReconcile = true;

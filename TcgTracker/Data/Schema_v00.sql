@@ -1,51 +1,57 @@
 PRAGMA user_version = 0;
 
+CREATE TABLE schema_meta (
+    schema_meta_id INTEGER PRIMARY KEY CHECK (schema_meta_id = 1),
+    schema_sha256  TEXT    NOT NULL    CHECK (length(schema_sha256) = 64),
+    created_at     TEXT    NOT NULL 
+);
+
 -- ==============================================================
 -- Printings: Identity. What a card IS, independent of ownership.
 -- One row per distinct printing in the world.
 -- ==============================================================
 CREATE TABLE printings (
-    printing_id      INTEGER PRIMARY KEY,
-    game             TEXT    NOT NULL
-                             CHECK (game IN ('pokemon', 'onepiece', 'mtg')),
-    name             TEXT    NOT NULL,
-    card_type        TEXT    NOT NULL DEFAULT 'none',
-    set_code         TEXT    NOT NULL,
-    collector_number TEXT    NOT NULL,
-    finish           TEXT    NOT NULL DEFAULT 'normal',
-    rarity           TEXT    NOT NULL DEFAULT 'none',
-    image_uri        TEXT,
+    printing_id        INTEGER PRIMARY KEY,
+    game               TEXT    NOT NULL
+                               CHECK (game IN ('pokemon', 'onepiece', 'mtg')),
+    name               TEXT    NOT NULL,
+    card_type          TEXT    NOT NULL DEFAULT 'none',
+    set_code           TEXT    NOT NULL,
+    collector_number   TEXT    NOT NULL,
+    finish             TEXT    NOT NULL DEFAULT 'normal',
+    rarity             TEXT    NOT NULL DEFAULT 'none',
+    image_uri          TEXT,
 
-    print_variant    TEXT    NOT NULL DEFAULT 'none',
-    variant_key      TEXT    NOT NULL DEFAULT 'none',
+    print_variant      TEXT    NOT NULL DEFAULT 'none',
+    variant_key        TEXT    NOT NULL DEFAULT 'none',
 
 -- ----- Source Identified: Scryfall UUID, TCGdex card_id, and optcgapi card_image_id -----
-    source_id        TEXT,
+    source_id          TEXT,
 
 -- ----- Source Name -----
-    source_name      TEXT,
+    source_name        TEXT,
 
 -- ----- TCGPlayer product ID -----
-    tcgplayer_id     INTEGER,
+    tcgplayer_id       INTEGER,
 
 -- ----- Cardmarket product ID (EUR prices) -----
-    cardmarket_id    INTEGER,
+    cardmarket_id      INTEGER,
 
 -- ----- Complete API Response, verbatim -----
-    raw_json         TEXT,
+    raw_json           TEXT,
 
 -- ----- Pokemon Specific -----
-    pkmn_promo_stamp TEXT    NOT NULL DEFAULT 'none',
+    pkmn_promo_stamp   TEXT    NOT NULL DEFAULT 'none',
 
 -- ----- One Piece Specific -----
-    op_parallel_type TEXT    NOT NULL DEFAULT 'none',
+    op_parallel_type   TEXT    NOT NULL DEFAULT 'none',
 
 -- ----- Magic The Gathering Specific -----
-    mtg_frame_style  TEXT    NOT NULL DEFAULT 'none',
+    mtg_frame_effects  TEXT    NOT NULL DEFAULT 'none',
 
-    created_at       TEXT    NOT NULL DEFAULT (datetime('now')),
+    created_at         TEXT    NOT NULL DEFAULT (datetime('now')),
 
-    UNIQUE (game, set_code, collector_number, finish, print_variant, variant_key, pkmn_promo_stamp, op_parallel_type, mtg_frame_style)
+    UNIQUE (game, set_code, collector_number, finish, print_variant, variant_key, pkmn_promo_stamp, op_parallel_type)
 );
 
 CREATE TABLE variant_collisions ( 
@@ -82,7 +88,10 @@ CREATE TABLE locations (
     description        TEXT,
 
     is_active          INTEGER NOT NULL DEFAULT 1
-                               CHECK (is_active IN (0,1))
+                               CHECK (is_active IN (0,1)),
+
+    is_sale_locked     INTEGER NOT NULL DEFAULT 0
+                               CHECK (is_sale_locked IN (0,1))
 );
 
 CREATE UNIQUE INDEX idx_locations_sibling ON locations (parent_location_id, name)
@@ -94,24 +103,57 @@ CREATE UNIQUE INDEX idx_locations_toplevel ON locations (name)
 CREATE INDEX idx_locations_parent ON locations (parent_location_id);
 
 -- ==============================================================
--- Prices: Market value over time. A fact about the WORLD, not
--- about copies. Refreshed forever; acquisition price isn't.
+-- Prices: Two tables because two questions asked.
+-- current_prices: "what is this card worth today?" Every
+--  priced printing , one row per number the source gives,
+--  overwritten on each refresh. Fast columns for search
+--  and sorting
+
+-- price_snapshots: "what was it worth over time?" Only 
+--  printings you hold. The source's pricing block VERBATIM.
+--  Prices can't be re-fetched, so history keeps the source's
+--  own words; interpreting them is code.
+--
+-- Graded prices (the old grade_key) need no column:
+--  a graded-price source will simply report metrics like 'psa10'
 -- ============================================================== 
-CREATE TABLE prices (
-    price_id    INTEGER PRIMARY KEY,
-    printing_id INTEGER NOT NULL
-                        REFERENCES  printings(printing_id),
-    price_date  TEXT    NOT NULL,
-    source      TEXT    NOT NULL,
+CREATE TABLE current_prices (
+    printing_id   INTEGER NOT NULL REFERENCES printings(printing_id),
 
-    grade_key   TEXT    NOT NULL DEFAULT 'raw',
+    source        TEXT    NOT NULL
+                          CHECK (source IN ('scryfall', 'tcgdex', 'optcgapi')),
 
-    price_cents INTEGER NOT NULL,
+    metric        TEXT    NOT NULL,
 
-    UNIQUE (printing_id, price_date, source, grade_key)                  
+    currency      TEXT    NOT NULL
+                          CHECK (currency IN ('USD', 'EUR')),
+    
+    amount_cents INTEGER NOT NULL
+                          CHECK (amount_cents >= 0),
+
+    -- source's date for the entry, not the date that it was pulled
+    as_of         TEXT    NOT NULL,
+    fetched_at    TEXT    NOT NULL,
+
+    PRIMARY KEY (printing_id, source, metric)
 );
 
-CREATE INDEX idx_prices_printing_date ON prices (printing_id, price_date DESC);
+CREATE TABLE price_snapshots (
+    snapshot_id INTEGER PRIMARY KEY,
+    printing_id INTEGER NOT NULL REFERENCES printings(printing_id),
+
+    source      TEXT    NOT NULL
+                          CHECK (source IN ('scryfall', 'tcgdex', 'optcgapi')),
+
+    as_of       TEXT    NOT NULL,
+
+    payload     TEXT    NOT NULL
+                        CHECK (json_valid(payload)),
+
+    fetched_at  TEXT    NOT NULL,
+
+    UNIQUE (printing_id, source, as_of) 
+);
 
 -- ==============================================================
 -- Sealed Purchases: A pack, box, or ETB you opened.
@@ -271,6 +313,50 @@ CREATE TABLE copies (
 CREATE INDEX idx_copies_status   ON copies (status);
 CREATE INDEX idx_copies_printing ON copies (printing_id);
 CREATE INDEX idx_copies_location ON copies (location_id);
+
+-- =========================================================================================================================
+-- Catalog Issues: What the catalog may be missing or got wrong, and why.
+-- Exists so gaps are visible to the user, not silent
+-- held_out   : the source lists it, the import couldn't store it
+-- merged     : the source lists it more than once with identical data; stored once
+-- corrected  : the import overrode a confirmed source error
+-- stale      : stored, but the source no longer lists it
+-- limitation : a known gap no import can detect (seeded below)
+-- Rows are never deleted. An issue not seen by a later complete run gets resolved_at; one that comes back is reopened
+-- =========================================================================================================================
+CREATE TABLE catalog_issues (
+    issue_id      INTEGER PRIMARY KEY,
+    game          TEXT    NOT NULL
+                          CHECK (game IN ('pokemon', 'onepiece', 'mtg')),
+    source_name   TEXT    NOT NULL,
+    kind          TEXT    NOT NULL
+                          CHECK (kind IN ('held_out', 'merged', 'corrected', 'stale', 'limitation')),
+    issue_key     TEXT    NOT NULL,
+    summary       TEXT    NOT NULL,
+    detail        TEXT,
+    first_seen_at TEXT    NOT NULL,
+    last_seen_at  TEXT    NOT NULL,
+    resolved_at   TEXT,
+
+    UNIQUE (game, source_name, kind, issue_key) 
+);
+
+CREATE INDEX idx_catalog_issues_open ON catalog_issues (game, resolved_at);
+
+-- ----- Seed: Known Limitations -----
+INSERT INTO catalog_issues (game, source_name, kind, issue_key, summary, detail, first_seen_at, last_seen_at)
+    VALUES ('onepiece', 'optcgapi', 'limitation', 'starter-deck-reprints',
+            'Starter-deck reprints identical to the original are recorded as the original.', 
+            'optcgapi gives them the same id and the same data, so the app cannot tell them apart.',
+            datetime('now'), datetime('now')),
+           ('onepiece', 'optcgapi', 'limitation', 'unlisted-printings',
+            'Some printings are not listed by optcgapi at all and are missing from the catalog.',
+            'Typically promotional or event cards. Manual entry is planned.',
+            datetime('now'), datetime('now')),
+           ('onepiece', 'optcgapi', 'limitation', 'don-numbering',
+            'DON!! card numbers are optcgapi''s internal counter, not printed on the card.',
+            'Search DON!! cards by name, not number.',
+            datetime('now'), datetime('now')); 
 
 -- ----- Seed Data -----
 INSERT OR IGNORE INTO locations (location_id, name, description)
